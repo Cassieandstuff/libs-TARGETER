@@ -10,3 +10,5 @@
 #include <targeter/RootMotion.h>
 #include <targeter/AutoTag.h>
 #include <targeter/KimodoSkeletons.h>
+#include <targeter/Mocap.h>
+#include <targeter/PferdHorse.h>

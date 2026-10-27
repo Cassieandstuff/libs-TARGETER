@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numbers>
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -197,6 +198,79 @@ static void TestRetargetIdentity() {
     CHECK(report.mappedBones >= 1, "RetargetClip mapped at least 1 bone");
 }
 
+// ── Mocap ─────────────────────────────────────────────────────────────────────
+
+static void TestResampleTake() {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    targeter::MarkerTake take;
+    take.markers       = {"m"};
+    take.frameDuration = 1.f / 240.f;
+    take.numFrames     = 241;
+    for (int f = 0; f < take.numFrames; ++f) take.points.push_back({float(f), 0.f, 0.f});
+    for (int f = 100; f < 120; ++f) take.points[std::size_t(f)] = {nan, nan, nan};
+    auto out = targeter::ResampleTake(take, 1.f / 30.f, 0.25f);
+    CHECK(out.numFrames == 31, "ResampleTake frame count");
+    bool line = true;
+    for (int k = 1; k < 30; ++k) line = line && Near(out.At(k, 0)[0], float(k * 8), 1e-3f);
+    CHECK(line, "ResampleTake follows the line through a filled gap");
+}
+
+static void TestMarkerPrefix() {
+    targeter::MocapLayout layout;
+    layout.bones = {{"b", "", "a", "c", ""}};
+    targeter::MarkerTake take;
+    take.markers = {"ID2_a", "ID2_c", "ID2_other"};
+    CHECK(targeter::MarkerPrefix(take, layout) == "ID2_", "MarkerPrefix finds the subject prefix");
+}
+
+static void TestRetargetMocapSwing() {
+    // Target: a body with one hanging leg. Source: markers on the body and the leg; the leg swings forward.
+    targeter::Skeleton tgt;
+    tgt.bones = {{"Root", -1, {}}, {"Body", 0, {}}, {"Leg", 1, {}}, {"Foot", 2, {}}};
+    tgt.bones[1].rest.t = {0.f, 0.f, 100.f};
+    tgt.bones[3].rest.t = {0.f, 0.f, -50.f};
+
+    targeter::MocapLayout layout;
+    layout.bones = {{"body", "", "back", "front", "right"}, {"leg", "body", "hip", "knee", "kneeSide"}};
+    targeter::MocapMap map;
+    map.root = "Root";
+    map.anchor = "Body";
+    map.anchorSource = "body";
+    map.pairs = {{"body", "Body"}, {"leg", "Leg", "Foot"}};
+
+    targeter::MarkerTake take;
+    take.name          = "swing";
+    take.markers       = {"back", "front", "right", "hip", "knee", "kneeSide"};
+    take.frameDuration = 1.f / 30.f;
+    take.numFrames     = 3;
+    const float angles[] = {0.f, 0.5f, 1.f};
+    for (float a : angles) {
+        // Swing about +X: the knee goes forward (+Y) and up.
+        const std::array<float, 3> knee{0.f, 40.f * std::sin(a), 100.f - 40.f * std::cos(a)};
+        take.points.push_back({0.f, -10.f, 100.f});
+        take.points.push_back({0.f, 10.f, 100.f});
+        take.points.push_back({10.f, 0.f, 100.f});
+        take.points.push_back({0.f, 0.f, 100.f});
+        take.points.push_back(knee);
+        take.points.push_back({10.f, knee[1], knee[2]});
+    }
+    targeter::MocapRetargetOptions opt;
+    opt.restFrame = 0;
+    opt.scale     = 1.f;
+    targeter::MocapReport report;
+    auto clip = targeter::RetargetMocap(layout, map, take, tgt, opt, &report);
+    CHECK(clip.has_value(), "RetargetMocap returns success");
+    CHECK(clip->numFrames == 3 && report.mappedBones == 2, "RetargetMocap keys every frame, maps both bones");
+    bool follows = true;
+    for (int f = 0; f < 3; ++f) {
+        std::vector<targeter::Transform> local(clip->poses.begin() + f * 4, clip->poses.begin() + f * 4 + 4);
+        const auto model = targeter::ComputeModelSpace(tgt, local);
+        const std::array<float, 3> want{0.f, 50.f * std::sin(angles[f]), 100.f - 50.f * std::cos(angles[f])};
+        follows = follows && NearVec3(model[3].t, want, 1e-2f);
+    }
+    CHECK(follows, "RetargetMocap swings the target leg as the markers do, at the target's length");
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -208,6 +282,9 @@ int main() {
     TestBoneMap();
     TestKimodoSkeletons();
     TestRetargetIdentity();
+    TestResampleTake();
+    TestMarkerPrefix();
+    TestRetargetMocapSwing();
     std::printf("All tests passed.\n");
     return 0;
 }

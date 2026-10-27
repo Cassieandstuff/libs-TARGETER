@@ -97,6 +97,28 @@ using Quat = std::array<float, 4>;  // x, y, z, w
     return {axis[0]*s, axis[1]*s, axis[2]*s, std::cos(half)};
 }
 
+/// Rotation whose matrix columns are `x`, `y`, `z` (the images of the local axes). Columns must be orthonormal.
+[[nodiscard]] inline Quat QFromColumns(Vec3 x, Vec3 y, Vec3 z) noexcept {
+    const float m00 = x[0], m10 = x[1], m20 = x[2];
+    const float m01 = y[0], m11 = y[1], m21 = y[2];
+    const float m02 = z[0], m12 = z[1], m22 = z[2];
+    const float tr  = m00 + m11 + m22;
+    if (tr > 0.f) {
+        const float s = std::sqrt(tr + 1.f) * 2.f;
+        return QNormalize({(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25f * s});
+    }
+    if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.f + m00 - m11 - m22) * 2.f;
+        return QNormalize({0.25f * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s});
+    }
+    if (m11 > m22) {
+        const float s = std::sqrt(1.f + m11 - m00 - m22) * 2.f;
+        return QNormalize({(m01 + m10) / s, 0.25f * s, (m12 + m21) / s, (m02 - m20) / s});
+    }
+    const float s = std::sqrt(1.f + m22 - m00 - m11) * 2.f;
+    return QNormalize({(m02 + m20) / s, (m12 + m21) / s, 0.25f * s, (m10 - m01) / s});
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 /// Extract the yaw (rotation around Z) from a direction vector.
