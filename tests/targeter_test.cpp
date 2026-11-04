@@ -273,7 +273,100 @@ static void TestRetargetMocapSwing() {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+using namespace targeter;
+
+/// @brief Two legged rig: root -> hips -> thigh L/R -> foot L/R, standing on z = 0, its left at -X.
+static Skeleton LegsRig() {
+    Skeleton s;
+    s.name = "legs";
+    const auto bone = [&](const char* name, int parent, std::array<float, 3> t) {
+        SkeletonBone b;
+        b.name   = name;
+        b.parent = parent;
+        b.rest.t = t;
+        s.bones.push_back(b);
+    };
+    bone("Root", -1, {0, 0, 0});
+    bone("Hips", 0, {0, 0, 100});
+    bone("LThigh", 1, {-10, 0, 0});
+    bone("LFoot", 2, {0, 0, -100});
+    bone("RThigh", 1, {10, 0, 0});
+    bone("RFoot", 4, {0, 0, -100});
+    return s;
+}
+
+static BoneMap LegsMap() {
+    BoneMap m;
+    m.name = "legs";
+    m.sourceRoot = "Root", m.sourceHips = "Hips", m.sourceLeftHip = "LThigh", m.sourceRightHip = "RThigh";
+    m.targetRoot = "Root", m.targetHips = "Hips";
+    for (const char* b : {"Root", "Hips", "LThigh", "LFoot", "RThigh", "RFoot"}) m.bones[b] = b;
+    return m;
+}
+
+static Clip RestClip(const Skeleton& s, int frames) {
+    Clip c;
+    c.name = "rest";
+    for (const auto& b : s.bones) c.bones.push_back(b.name);
+    c.Resize(frames);
+    for (int f = 0; f < frames; ++f)
+        for (std::size_t b = 0; b < s.bones.size(); ++b) c.At(f, int(b)) = s.bones[b].rest;
+    return c;
+}
+
+static void TestRetargetPoseOffset() {
+    const Skeleton s = LegsRig();
+    const Clip     c = RestClip(s, 2);
+    BoneMap        m = LegsMap();
+    RetargetReport plain;
+    const auto     base = RetargetClip(s, c, s, m, &plain);
+    CHECK(base.has_value(), "retarget without a pose");
+    CHECK(std::abs(plain.scale - 1.f) < 1e-4f, "same rig scales by one");
+
+    // Turning the left thigh 90 deg about X in its own frame swings the foot below it, and only that foot.
+    const float k = std::sqrt(0.5f);
+    m.pose["LThigh"] = {k, 0.f, 0.f, k};
+    const auto posed = RetargetClip(s, c, s, m);
+    CHECK(posed.has_value(), "retarget with a pose");
+    std::vector<Transform> local(s.bones.size());
+    for (std::size_t b = 0; b < s.bones.size(); ++b) local[b] = posed->At(1, int(b));
+    const auto model = ComputeModelSpace(s, local);
+    CHECK(std::abs(model[3].t[2] - 100.f) < 1e-2f && std::abs(std::abs(model[3].t[1]) - 100.f) < 1e-2f, "the offset swings the child");
+    CHECK(std::abs(model[5].t[2]) < 1e-2f, "the other leg stays");
+}
+
+static void TestPlaceSourcePoint() {
+    const Skeleton s = LegsRig();
+    RetargetReport r;
+    CHECK(RetargetClip(s, RestClip(s, 1), s, LegsMap(), &r).has_value(), "retarget for placement");
+    const auto p = PlaceSourcePoint(r, {3.f, 4.f, 50.f});
+    CHECK(std::abs(p[0] - 3.f) < 1e-3f && std::abs(p[1] - 4.f) < 1e-3f && std::abs(p[2] - 50.f) < 1e-3f, "same rig places a point on itself");
+}
+
+static void TestFootPlants() {
+    Skeleton s = LegsRig();
+    Clip     c = RestClip(s, 30);
+    // The left foot stands for frames 0-9, lifts and moves over 10-19, stands again 20-29; the right never leaves the floor.
+    const int lfoot = c.BoneIndex("LFoot");
+    for (int f = 0; f < 30; ++f) {
+        const float lift = f >= 10 && f < 20 ? 20.f : 0.f;
+        const float step = f < 10 ? 0.f : f < 20 ? float(f - 10) * 5.f : 50.f;
+        c.At(f, lfoot).t = {0.f, step, -100.f + lift};
+    }
+    const FootPlants p = DetectFootPlants(c, s, {"Root", "LFoot", "RFoot"});
+    CHECK(p.hasFeet, "a rig with feet");
+    CHECK(p.ranges[0].size() == 2, "the left foot plants twice");
+    CHECK(p.ranges[0].front().first == 0 && p.ranges[0].back().second == 30, "plants reach the clip's edges");
+    CHECK(p.ranges[1].size() == 1 && p.ranges[1][0] == FrameRange(0, 30), "the right foot stands throughout");
+    const auto center = PlantCenter(p.foot[0], p.ranges[0].back());
+    CHECK(std::abs(center[1] - 50.f) < 1e-3f, "a plant stands where its foot does");
+    CHECK(!DetectFootPlants(c, s, {"Root", "Nope", "RFoot"}).hasFeet, "no foot, no plants");
+}
+
 int main() {
+    TestRetargetPoseOffset();
+    TestPlaceSourcePoint();
+    TestFootPlants();
     TestTransformDefault();
     TestComposeIdentity();
     TestComputeModelSpace();

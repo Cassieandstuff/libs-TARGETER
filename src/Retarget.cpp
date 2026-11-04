@@ -51,7 +51,10 @@ std::expected<Clip, std::string> RetargetClip(
     std::vector<int> srcOf(nT, -1);
     for (std::size_t b = 0; b < nT; ++b) {
         const std::string s = map.SourceOf(target.bones[b].name);
-        if (!s.empty()) srcOf[b] = source.BoneIndex(s);
+        if (!s.empty()) {
+            srcOf[b] = source.BoneIndex(s);
+            if (srcOf[b] < 0 && report) report->missingSource.push_back(s);
+        }
     }
 
     auto srcIdx = [&](const std::string& name, const char* fallbackTarget) -> int {
@@ -134,11 +137,14 @@ std::expected<Clip, std::string> RetargetClip(
             if (target.bones[c].parent == int(b) && srcOf[c] >= 0) aimChild = int(c);
         if (aimChild < 0 || srcOf[std::size_t(aimChild)] < 0) continue;
 
-        // Target bone vector toward aim child (in target world space).
-        const Vec3 dT = QRotate(alignedWorld[b],
-            {target.bones[std::size_t(aimChild)].rest.t[0],
-             target.bones[std::size_t(aimChild)].rest.t[1],
-             target.bones[std::size_t(aimChild)].rest.t[2]});
+        // Target bone vector toward aim child (in target world space). An aim may skip unmapped bones (Neck1 -> Head past
+        // Neck2), which hold their rest pose under b, so the offset is the rest pose's from b to the child.
+        const Vec3 offset = target.bones[std::size_t(aimChild)].parent == int(b)
+            ? Vec3{target.bones[std::size_t(aimChild)].rest.t[0],
+                   target.bones[std::size_t(aimChild)].rest.t[1],
+                   target.bones[std::size_t(aimChild)].rest.t[2]}
+            : QRotate(QInverse(tgtRest.q[b]), Sub(tgtRest.p[std::size_t(aimChild)], tgtRest.p[b]));
+        const Vec3 dT = QRotate(alignedWorld[b], offset);
         // Source bone vector toward corresponding aim child (in facing-corrected world space).
         const Vec3 dS = Sub(srcRestP[std::size_t(srcOf[std::size_t(aimChild)])],
                              srcRestP[std::size_t(srcOf[b])]);
@@ -147,6 +153,16 @@ std::expected<Clip, std::string> RetargetClip(
         alignedWorld[b] = QNormalize(QMul(QFromTo(Normalize(dT), Normalize(dS)), alignedWorld[b]));
         alignedLocal[b] = p < 0 ? alignedWorld[b]
                                  : QNormalize(QMul(QInverse(alignedWorld[std::size_t(p)]), alignedWorld[b]));
+    }
+
+    // Retarget pose: hand-set local offsets on the aligned rest, carried down the chain.
+    if (!map.pose.empty()) {
+        for (std::size_t b = 0; b < nT; ++b) {
+            if (const auto it = map.pose.find(target.bones[b].name); it != map.pose.end())
+                alignedLocal[b] = QNormalize(QMul(alignedLocal[b], {it->second[0], it->second[1], it->second[2], it->second[3]}));
+            const int p     = target.bones[b].parent;
+            alignedWorld[b] = p < 0 ? alignedLocal[b] : QNormalize(QMul(alignedWorld[std::size_t(p)], alignedLocal[b]));
+        }
     }
 
     // ── Output clip ──────────────────────────────────────────────────────────
@@ -169,11 +185,12 @@ std::expected<Clip, std::string> RetargetClip(
     // ── Per-frame ────────────────────────────────────────────────────────────
     std::vector<Quat> wq(nT);
     std::vector<Vec3> wp(nT);
+    std::vector<int>  clipTrack(nS);
+    for (std::size_t i = 0; i < nS; ++i) clipTrack[i] = clip.BoneIndex(source.bones[i].name);
 
     for (int f = 0; f < clip.numFrames; ++f) {
         const World src = Fk(source, [&](std::size_t i) -> const Transform& {
-            const int ci = clip.BoneIndex(source.bones[i].name);
-            return ci >= 0 ? clip.At(f, ci) : source.bones[i].rest;
+            return clipTrack[i] >= 0 ? clip.At(f, clipTrack[i]) : source.bones[i].rest;
         });
 
         // Facing-corrected source world rotation: facing * srcFrame.q
@@ -228,9 +245,11 @@ std::expected<Clip, std::string> RetargetClip(
     }
 
     // Make root XY start-relative (frame 0 at the origin).
+    float startX = 0.f, startY = 0.f;
     if (tRoot >= 0 && out.numFrames > 0) {
         const float dx = out.At(0, tRoot).t[0];
         const float dy = out.At(0, tRoot).t[1];
+        startX = dx, startY = dy;
         if (dx != 0.f || dy != 0.f)
             for (int f = 0; f < out.numFrames; ++f) {
                 out.At(f, tRoot).t[0] -= dx;
@@ -241,8 +260,18 @@ std::expected<Clip, std::string> RetargetClip(
     if (report) {
         report->mappedBones   = mapped;
         report->unmappedBones = unmapped;
+        report->scale         = scale;
+        report->facing        = {facing[0], facing[1], facing[2], facing[3]};
+        report->sourceGround  = srcGround;
+        report->targetGround  = tgtGround;
+        report->startOffset   = {startX, startY};
     }
     return out;
+}
+
+std::array<float, 3> PlaceSourcePoint(const RetargetReport& r, const std::array<float, 3>& p) {
+    const Vec3 faced = QRotate({r.facing[0], r.facing[1], r.facing[2], r.facing[3]}, {p[0], p[1], p[2] - r.sourceGround});
+    return {r.scale * faced[0] - r.startOffset[0], r.scale * faced[1] - r.startOffset[1], r.scale * faced[2] + r.targetGround};
 }
 
 } // namespace targeter

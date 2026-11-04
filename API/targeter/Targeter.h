@@ -6,6 +6,7 @@
 #include <targeter/Clip.h>
 #include <targeter/Skeleton.h>
 #include <targeter/BoneMap.h>
+#include <targeter/FootPlants.h>
 #include <targeter/Retarget.h>
 #include <targeter/RootMotion.h>
 #include <targeter/AutoTag.h>

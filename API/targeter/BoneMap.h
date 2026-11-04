@@ -2,6 +2,7 @@
 // BoneMap — describes how to retarget from a source skeleton onto a target.
 // All bone names are exact byte matches against Skeleton::bones[i].name.
 
+#include <array>
 #include <map>
 #include <string>
 #include <string_view>
@@ -26,6 +27,10 @@ struct BoneMap {
     std::map<std::string, std::string> bones;
     /// target bone name → aim-child bone name (for aim-driven retargeting)
     std::map<std::string, std::string> aim;
+    /// The retarget pose: target bone name → local rotation (x, y, z, w) on top of the rest alignment, applied parent-first
+    /// so it carries down the chain (UE's "edit retarget pose"). The offset right-multiplies the bone's aligned rest, so on
+    /// every frame the bone's world rotation becomes W * offset.
+    std::map<std::string, std::array<float, 4>> pose;
 
     /// @return the source bone driving `targetBone`, or empty string if unmapped.
     [[nodiscard]] std::string SourceOf(std::string_view targetBone) const;
