@@ -335,6 +335,32 @@ static void TestRetargetPoseOffset() {
     CHECK(std::abs(model[5].t[2]) < 1e-2f, "the other leg stays");
 }
 
+static void TestHipsDontAim() {
+    // The source's spine rises straight off its hips; the target's starts well behind them, as Skyrim's does.
+    const Skeleton source = [] {
+        Skeleton s = LegsRig();
+        SkeletonBone b;
+        b.name = "Spine", b.parent = 1, b.rest.t = {0, 0, 10};
+        s.bones.push_back(b);
+        b.name = "Chest", b.parent = 6, b.rest.t = {0, 0, 20};
+        s.bones.push_back(b);
+        return s;
+    }();
+    Skeleton target = source;
+    target.bones[6].rest.t = {0, -8, 6};
+    BoneMap m = LegsMap();
+    m.bones["Spine"] = "Spine";
+    m.bones["Chest"] = "Chest";
+    const auto out = RetargetClip(source, RestClip(source, 1), target, m);
+    CHECK(out.has_value(), "retarget a spine that starts behind the hips");
+    const auto& hips = out->At(0, target.BoneIndex("Hips"));
+    CHECK(NearQuat(hips.r, {0, 0, 0, 1}), "the hips keep their rest rotation");
+    std::vector<Transform> local(target.bones.size());
+    for (std::size_t b = 0; b < target.bones.size(); ++b) local[b] = out->At(0, int(b));
+    const auto model = ComputeModelSpace(target, local);
+    CHECK(std::abs(model[6].t[1] + 8.f) < 1e-3f && std::abs(model[6].t[2] - 106.f) < 1e-3f, "the spine stays where the rig puts it");
+}
+
 static void TestPlaceSourcePoint() {
     const Skeleton s = LegsRig();
     RetargetReport r;
@@ -366,6 +392,7 @@ static void TestFootPlants() {
 int main() {
     TestRetargetPoseOffset();
     TestPlaceSourcePoint();
+    TestHipsDontAim();
     TestFootPlants();
     TestTransformDefault();
     TestComposeIdentity();

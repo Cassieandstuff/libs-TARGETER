@@ -128,6 +128,10 @@ std::expected<Clip, std::string> RetargetClip(
         alignedPos[b]    = p < 0 ? restT : Add(alignedPos[std::size_t(p)], QRotate(alignedWorld[std::size_t(p)], restT));
 
         if (srcOf[b] < 0) continue;
+        // The root and hips keep their rest rotation: what lies between them and their children is where the rig puts its
+        // joints, not a limb's direction. Skyrim's spine starts 54 deg back from COM against a Mannequin's nearly straight
+        // up, and aiming across that turned COM, and the pelvis under it, 50 deg forward.
+        if (int(b) == tRoot || int(b) == tHips) continue;
 
         // Aim child: from map.aim, or first mapped child bone.
         int aimChild = -1;
