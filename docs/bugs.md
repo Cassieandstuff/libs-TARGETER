@@ -18,7 +18,7 @@ vanilla skeleton of `D:/Projects/Common/Skyrim Source/Data`, before (`af24ae5`) 
 Root tilt, root heading wobble and the root's start height measured 0 before and after: UE clips carry an authored root
 on the floor, so R3 and R4 show only on sources without one (mocap, cmu-daz) and are pinned by the synthetic tests.
 
-## R1 — Twist bones hold their rest: the wrist and upper arm candy-wrap — FIXED (23269f4, b75bc7a, and the chained twist commit)
+## R1 — Twist bones hold their rest: the wrist and upper arm candy-wrap — FIXED (23269f4, b75bc7a, 8ce5ea5)
 
 - **Symptom:** a hand that pronates, or an upper arm that rolls, twists the skin at one joint. Skyrim's
   `UpperarmTwist1/2` and `ForearmTwist1/2` stay at rest under their parent.
