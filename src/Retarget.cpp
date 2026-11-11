@@ -315,19 +315,26 @@ std::expected<Clip, std::string> RetargetClip(
         const int bone   = target.BoneIndex(name);
         const int driver = target.BoneIndex(from.driver);
         const int parent = bone >= 0 ? target.bones[std::size_t(bone)].parent : -1;
-        Twist     t{bone, driver, driver >= 0 && driver == parent, {1.f, 0.f, 0.f}, from.fraction};
+        Twist     t{bone, driver, driver >= 0 && driver == parent, {1.f, 0.f, 0.f}, 0.f};
         bool      ok = bone >= 0 && driver >= 0 && parent >= 0 && srcOf[std::size_t(bone)] < 0;
+        Vec3      limb{0.f, 0.f, 0.f};   // the limb the twist runs along, in the parent's frame
         if (ok && t.own) {
             // The parent's own long axis: toward its aim child, else its first child that isn't the twist bone.
             int along = aimOf[std::size_t(parent)];
             for (std::size_t c = std::size_t(parent) + 1; along < 0 && c < nT; ++c)
                 if (target.bones[c].parent == parent && int(c) != bone) along = int(c);
-            ok = along >= 0 && LenSq(RestOffset(target, tgtRest, parent, along)) > 1e-8f;
-            if (ok) t.axis = Normalize(RestOffset(target, tgtRest, parent, along));
-        } else if (ok) {
+            if (along >= 0) limb = RestOffset(target, tgtRest, parent, along);
+        } else if (ok && target.bones[std::size_t(driver)].parent == parent) {
             // A sibling driver (a hand under the forearm) twists about the line from their parent to it.
-            ok = target.bones[std::size_t(driver)].parent == parent && LenSq(V(target.bones[std::size_t(driver)].rest.t)) > 1e-8f;
-            if (ok) t.axis = Normalize(V(target.bones[std::size_t(driver)].rest.t));
+            limb = V(target.bones[std::size_t(driver)].rest.t);
+        }
+        ok = ok && LenSq(limb) > 1e-8f;
+        if (ok) {
+            t.axis = Normalize(limb);
+            // By default the share follows where the bone sits along the limb: all of a hand's pronation at the wrist, none
+            // at the elbow; all of an upper arm's roll undone at the shoulder, none at the elbow.
+            const float at = std::clamp(Dot(V(target.bones[std::size_t(bone)].rest.t), t.axis) / Len(limb), 0.f, 1.f);
+            t.fraction     = from.fraction ? *from.fraction : t.own ? -(1.f - at) : at;
         }
         if (ok) twists.push_back(t);
         else rep.ignoredTwists.push_back(name);

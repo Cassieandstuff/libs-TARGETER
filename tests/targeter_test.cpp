@@ -463,6 +463,18 @@ static void TestTwistBonesShareTheTwist() {
     CHECK(NearQuat(ft, Rot(40.f, {1, 0, 0}), 1e-3f), "R1 a forearm twist bone takes half the hand's pronation");
     CHECK(NearQuat(ut, Rot(-30.f, {1, 0, 0}), 1e-3f), "R1 an upper-arm twist bone turns back half the arm's roll");
 
+    // With no fraction, each takes its share by where it sits: FTwist halfway down the forearm, UTwist a quarter of the
+    // way down the upper arm (so three quarters of the roll undone).
+    BoneMap byPlace = m;
+    byPlace.twist["FTwist"] = {"Hand", std::nullopt};
+    byPlace.twist["UTwist"] = {"Upper", std::nullopt};
+    const auto placed = RetargetClip(s, c, t, byPlace, RetargetOptions{});
+    CHECK(placed.has_value(), "R1 retarget with twist shares by place");
+    if (placed) {
+        CHECK(NearQuat(placed->At(0, placed->BoneIndex("FTwist")).r, Rot(40.f, {1, 0, 0}), 1e-3f), "R1 halfway down the forearm, half the pronation");
+        CHECK(NearQuat(placed->At(0, placed->BoneIndex("UTwist")).r, Rot(-45.f, {1, 0, 0}), 1e-3f), "R1 near the shoulder, most of the roll undone");
+    }
+
     BoneMap bad = m;
     bad.twist["FTwist"] = {"Hips", 0.5f};
     RetargetReport rb;

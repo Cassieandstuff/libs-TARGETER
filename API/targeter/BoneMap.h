@@ -16,7 +16,10 @@ struct TwistSource {
     /// The bone twisting: the twist bone's parent (an upper arm's own twist, shared back down to its twist bones) or a
     /// child of that parent (a hand's pronation, shared up the forearm's twist bones).
     std::string driver;
-    float       fraction = 0.5f;   ///< the share of the driver's twist; negative turns against it
+    /// The share of the driver's twist; negative turns against it. Empty: by where the twist bone sits along the limb (a
+    /// forearm twist bone halfway to the hand takes half its pronation; an upper-arm one near the shoulder undoes most of
+    /// the arm's roll).
+    std::optional<float> fraction;
     bool operator==(const TwistSource&) const = default;
 };
 
