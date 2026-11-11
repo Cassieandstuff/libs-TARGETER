@@ -22,6 +22,8 @@ test that pins it (`tests/targeter_test.cpp`). Measurements on real clips come f
   source's (Skyrim's legs are 0.742 of hip height against 0.710), so the same joint angles put the foot elsewhere.
   `DetectFootPlants` found the plants, but nothing pinned them.
 - **Test:** `TestFootLockPinsPlants`.
+- **Note:** `RetargetOptions::lockFeet` is off in the library, but BK's Retarget window turns it on by default. Re-baking a
+  clip there changes the thighs, calves and feet of its planted frames, compared with a bake made before.
 
 ## R3 — The root pitches, rolls and sways — OPEN
 
