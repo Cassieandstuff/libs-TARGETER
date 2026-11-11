@@ -119,6 +119,32 @@ using Quat = std::array<float, 4>;  // x, y, z, w
     return QNormalize({(m02 + m20) / s, (m12 + m21) / s, 0.25f * s, (m10 - m01) / s});
 }
 
+/// Spherical interpolation from `a` (t = 0) to `b` (t = 1), the short way round.
+[[nodiscard]] inline Quat QSlerp(Quat a, Quat b, float t) noexcept {
+    float d = QDot(a, b);
+    if (d < 0.f) {
+        b = {-b[0], -b[1], -b[2], -b[3]};
+        d = -d;
+    }
+    if (d > 0.9995f)
+        return QNormalize({a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t});
+    const float theta = std::acos(d);
+    const float s     = std::sin(theta);
+    const float wa    = std::sin((1.f - t) * theta) / s;
+    const float wb    = std::sin(t * theta) / s;
+    return QNormalize({a[0] * wa + b[0] * wb, a[1] * wa + b[1] * wb, a[2] * wa + b[2] * wb, a[3] * wa + b[3] * wb});
+}
+
+/// The signed angle (radians, in (-pi, pi]) of `q`'s twist about unit `axis` (swing-twist decomposition).
+[[nodiscard]] inline float TwistAngle(Quat q, Vec3 axis) noexcept {
+    constexpr float kPi   = 3.14159265358979f;
+    const float     along = q[0] * axis[0] + q[1] * axis[1] + q[2] * axis[2];
+    float           a     = 2.f * std::atan2(along, q[3]);
+    if (a > kPi) a -= 2.f * kPi;
+    if (a <= -kPi) a += 2.f * kPi;
+    return a;
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 /// Extract the yaw (rotation around Z) from a direction vector.

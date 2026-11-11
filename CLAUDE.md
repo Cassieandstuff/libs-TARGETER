@@ -24,11 +24,11 @@ TARGETER provides three layers:
 ## Public surface
 
 - Consumers link `targeter::targeter` and `#include <targeter/Targeter.h>` — nothing else.
-  Component headers under `include/targeter/` exist to organize the umbrella, not as direct
+  Component headers under `API/targeter/` exist to organize the umbrella, not as direct
   entry points.
 - Everything is in `namespace targeter`, except `KimodoSkeletons.h` which uses
   `namespace targeter::kimskel`.
-- No external dependency. Math lives in `cpp/Math.h` (private to the library, never installed):
+- No external dependency. Math lives in `src/MathOps.h` (private to the library, never installed):
   quaternion and vector operations over `std::array<float, 3/4>`. No glm, no Eigen.
 - Never set `CMAKE_MSVC_RUNTIME_LIBRARY`. Inherits from the consumer (static-CRT SKSE plugins
   and dynamic-CRT Qt apps both consume it).
@@ -43,7 +43,7 @@ TARGETER provides three layers:
 - Scales are `std::array<float, 3>` (uniform scale = all three equal to the same value). The
   retargeter assumes scale = 1 throughout; callers that bake scale before feeding a clip in are
   fine.
-- `cpp/Math.h` provides: `Vec3`, `Quat`, and all the helpers (`QMul`, `QRotate`, `QInverse`,
+- `src/MathOps.h` provides: `Vec3`, `Quat`, and all the helpers (`QMul`, `QRotate`, `QInverse`,
   `QNormalize`, `QFromTo`, `QAngleAxis`, `Dot`, `Cross`, `Normalize`, `YawOf`). Keep all math
   using those types; do not promote `std::array` to glm or Eigen anywhere in the library.
 
@@ -56,7 +56,7 @@ TARGETER provides three layers:
   + bool pairs, no exceptions.
 - `operator==` defaulted on all data types; no hand-written comparators.
 - Types are `PascalCase`, functions `PascalCase`, member variables and locals `camelCase`,
-  constants `kCamelCase`. Private `cpp/` helpers follow the same rules.
+  constants `kCamelCase`. Private `src/` helpers follow the same rules.
 - No comments that restate what the code does; only comments that explain WHY (a constraint,
   a subtle invariant, a cited source). Public headers carry a one-line doc comment per exported
   symbol.
@@ -76,11 +76,11 @@ silently. Loaders that read skeletons are responsible for sorting.
 
 ## Adding a new feature
 
-- New data-model types go in a new header under `include/targeter/` and a new `.cpp` under
-  `cpp/`. Add the `#include` to `Targeter.h` (the umbrella). Add a test to `tests/targeter_test.cpp`.
+- New data-model types go in a new header under `API/targeter/` and a new `.cpp` under
+  `src/`. Add the `#include` to `Targeter.h` (the umbrella). Add a test to `tests/targeter_test.cpp`.
 - New utility functions (operations on Skeleton/Clip) follow the `RootMotion` and `AutoTag`
   pattern: a header with `[[nodiscard]]` free functions, an impl, added to the umbrella, tested.
-- Never add a dependency. If the math you need isn't in `cpp/Math.h`, add it there. If you need
+- Never add a dependency. If the math you need isn't in `src/MathOps.h`, add it there. If you need
   a YAML reader, put it in the consumer (DCC has ryml; SCT has its own YAML layer).
 
 ## Consumers

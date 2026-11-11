@@ -10,7 +10,9 @@ C++23 skeletal animation data model and retargeting library.
 | `targeter/Skeleton.h` | `Skeleton`, `SkeletonBone`, `Compose`, `ComputeModelSpace` |
 | `targeter/Clip.h` | `Clip`, `FrameRange`, `RangeMap`, `AnnotationTrack`, `FloatTrack`, `NormalizeRanges` |
 | `targeter/BoneMap.h` | `BoneMap` — target→source bone mapping for retargeting |
-| `targeter/Retarget.h` | `RetargetClip` — rest-aligned world-delta retargeting |
+| `targeter/Retarget.h` | `RetargetClip`, `RetargetOptions`, `TurnPoseOffset` — rest-aligned world-delta retargeting, twist bones, chain bends, foot lock |
+| `targeter/FootPlants.h` | `DetectFootPlants`, `PlantCenter` — when and where each foot stands |
+| `targeter/Mocap.h` | `RetargetMocap` — optical markers onto a skeleton, through `RetargetClip` |
 | `targeter/RootMotion.h` | `GroundRoot` — remove lateral drift and vertical offset |
 | `targeter/AutoTag.h` | `MeasureClip`, `AutoTag` — CB-compatible motion tagging |
 | `targeter/KimodoSkeletons.h` | `smplx22`, `soma30`, `g1skel34` rig specs (Apache-2.0, metres) |
@@ -21,7 +23,7 @@ Include only `<targeter/Targeter.h>`.
 
 - **Axis**: Z up, character faces +Y, Skyrim game units.
 - **Quaternion**: XYZW (`w` at `[3]`). Havok QsTransform layout: scale → rotate → translate.
-- **Dependency-free**: no external libraries. Math is in `cpp/MathOps.h` (private).
+- **Dependency-free**: no external libraries. Math is in `src/MathOps.h` (private).
 - **MSVC runtime**: not set — inherits from the consuming project.
 - **Parent-before-child**: `Skeleton::bones` must have parents at lower indices.
 
@@ -55,5 +57,5 @@ ctest --test-dir build
 
 GPL-3.0-only. The copyright holder may license under other terms.
 
-`include/targeter/KimodoSkeletons.h` contains data vendored from
+`API/targeter/KimodoSkeletons.h` contains data vendored from
 [localai-org/kimodo.cpp](https://github.com/localai-org/kimodo.cpp) (Apache-2.0).

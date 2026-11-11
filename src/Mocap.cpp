@@ -1,4 +1,5 @@
 #include <targeter/Mocap.h>
+#include <targeter/Retarget.h>
 #include "MathOps.h"
 
 #include <algorithm>
@@ -302,19 +303,18 @@ std::expected<Clip, std::string> RetargetMocap(const MocapLayout& layout, const 
     const std::vector<Transform> bindLocal = target.RestLocal();
     const std::vector<Transform> bindModel = ComputeModelSpace(target, bindLocal);
     auto pos = [&](int b) { const auto& t = bindModel[std::size_t(b)].t; return Vec3{t[0], t[1], t[2]}; };
-    auto rot = [&](const Transform& t) { return Quat{t.r[0], t.r[1], t.r[2], t.r[3]}; };
 
     // Pairs by target bone.
     std::unordered_map<std::string, int> srcByName;
     for (std::size_t i = 0; i < layout.bones.size(); ++i) srcByName.emplace(layout.bones[i].name, int(i));
-    struct Drive { int src = -1, aim = -1; bool align = false; };
+    struct Drive { int src = -1, aim = -1; };
     std::vector<Drive> drive(nT);
     for (const MocapPair& p : map.pairs) {
         const auto s = srcByName.find(p.source);
         const int  t = target.BoneIndex(p.target);
         if (s == srcByName.end()) { rep.missing.push_back(p.source); continue; }
         if (t < 0) { rep.missing.push_back(p.target); continue; }
-        drive[std::size_t(t)] = {s->second, p.targetAim.empty() ? -1 : target.BoneIndex(p.targetAim), false};
+        drive[std::size_t(t)] = {s->second, p.targetAim.empty() ? -1 : target.BoneIndex(p.targetAim)};
         if (!p.targetAim.empty() && drive[std::size_t(t)].aim < 0) rep.missing.push_back(p.targetAim);
     }
 
@@ -353,97 +353,101 @@ std::expected<Clip, std::string> RetargetMocap(const MocapLayout& layout, const 
     }
     if (restFrame >= restTake.numFrames) return std::unexpected(std::format("rest frame {} is past the take", restFrame));
     rep.restFrame = restFrame;
-    const Pose              rest      = Solve(restBound, FramePoints(restBound, restTake, restFrame));
-    const std::vector<Quat> restCanon = canonical(rest);
+    // The rest frame's pose, its heading removed: the source skeleton's rest. A bone missing at rest has nothing to
+    // measure motion from, so it drives nothing.
+    const Pose rest = Solve(restBound, FramePoints(restBound, restTake, restFrame));
     if (!rest.ok[std::size_t(anchorSrc)]) return std::unexpected(std::string("the anchor source bone is missing in the rest frame"));
 
-    // A pair whose source bone is missing at rest has nothing to measure motion from.
-    std::vector<Quat> aligned(nT);
-    for (std::size_t t = 0; t < nT; ++t) {
-        Drive& d   = drive[t];
-        aligned[t] = rot(bindModel[t]);
-        if (d.src < 0) continue;
-        if (!rest.ok[std::size_t(d.src)]) {
-            d.src = -1;
-            continue;
-        }
-        ++rep.mappedBones;
-        if (d.align && d.aim >= 0) {
-            const Vec3 from = Normalize(Sub(pos(d.aim), pos(int(t))));
-            const Vec3 to   = QRotate(restCanon[std::size_t(d.src)], kAim);
-            aligned[t]      = QNormalize(QMul(QFromTo(from, to), aligned[t]));
-        }
-    }
+    // The source skeleton: a floor bone at the capture's origin (markers stand on z = 0), then the layout's bones. The
+    // floor pairs with the target's root so the two grounds are the floors; the heading still comes from the anchor.
+    const std::size_t nS = layout.bones.size();
+    const std::string floorName = "mocap floor";
+    Skeleton          srcSkel;
+    srcSkel.name = layout.name;
+    srcSkel.bones.push_back({floorName, -1, {}});
+    for (std::size_t i = 0; i < nS; ++i) srcSkel.bones.push_back({layout.bones[i].name, bound.bones[i].parent + 1, {}});
 
-    const float restHeight = rest.p[std::size_t(anchorSrc)][2];
-    float       scale      = options.scale;
-    if (scale <= 0.f) {
-        if (restHeight <= 1e-3f) return std::unexpected(std::string("the anchor source bone is not above the ground at rest"));
-        scale = pos(anchor)[2] / restHeight;
-    }
-    rep.scale = scale;
+    /// Model-space transforms of one solved pose, turned by `turn` about the origin, as locals over `srcSkel`. A bone
+    /// not seen keeps its rest under its parent.
+    std::vector<Transform> restLocal(nS + 1);
+    auto locals = [&](const Pose& pose, Quat turn, bool isRest) {
+        std::vector<Quat>      q(nS + 1, Quat{0.f, 0.f, 0.f, 1.f});
+        std::vector<Vec3>      p(nS + 1, Vec3{0.f, 0.f, 0.f});
+        std::vector<Transform> out(nS + 1);
+        for (std::size_t i = 0; i < nS; ++i) {
+            const std::size_t s = i + 1;
+            const int         parent = srcSkel.bones[s].parent;
+            const Quat        pq = q[std::size_t(parent)];
+            const Vec3        pp = p[std::size_t(parent)];
+            if (pose.ok[i] && rest.ok[i]) {
+                q[s] = QNormalize(QMul(turn, pose.q[i]));
+                p[s] = QRotate(turn, pose.p[i]);
+                const Quat lq = QNormalize(QMul(QInverse(pq), q[s]));
+                const Vec3 lt = QRotate(QInverse(pq), Sub(p[s], pp));
+                out[s].r = {lq[0], lq[1], lq[2], lq[3]};
+                out[s].t = {lt[0], lt[1], lt[2]};
+            } else {
+                out[s] = isRest ? Transform{} : restLocal[s];
+                if (isRest) {
+                    const Vec3 lt = QRotate(QInverse(pq), Sub(QRotate(turn, pose.p[i]), pp));
+                    out[s].t      = {lt[0], lt[1], lt[2]};
+                }
+                q[s] = QNormalize(QMul(pq, Quat{out[s].r[0], out[s].r[1], out[s].r[2], out[s].r[3]}));
+                p[s] = Add(pp, QRotate(pq, Vec3{out[s].t[0], out[s].t[1], out[s].t[2]}));
+            }
+        }
+        return out;
+    };
+    restLocal = locals(rest, QAngleAxis(-Yaw(rest.q[std::size_t(anchorSrc)]), kUp), true);
+    for (std::size_t s = 0; s <= nS; ++s) srcSkel.bones[s].rest = restLocal[s];
 
     const int first = std::clamp(int(std::lround(options.start / options.frameDuration)), 0, clipTake.numFrames - 1);
     const int last  = options.end > 0.f
                           ? std::clamp(int(std::lround(options.end / options.frameDuration)), first, clipTake.numFrames - 1)
                           : clipTake.numFrames - 1;
 
-    Clip clip;
-    clip.name          = take.name;
-    clip.skeleton      = target.bones[0].name;
-    clip.frameDuration = options.frameDuration;
-    for (const SkeletonBone& b : target.bones) clip.bones.push_back(b.name);
-    clip.Resize(last - first + 1);
-
-    const Vec3 anchorFromRoot = Sub(pos(anchor), pos(root));
-    float      yaw0 = 0.f, yaw = 0.f;
-    Vec3       origin0{0.f, 0.f, 0.f}, travel{0.f, 0.f, 0.f};
-    float      height = restHeight;
-    std::vector<Quat> delta(layout.bones.size()), world(nT);
-    std::vector<Vec3> worldPos(nT);
+    // The take as a clip on that skeleton, turned so it starts facing +Y as the rest does.
+    Clip srcClip;
+    srcClip.name          = take.name;
+    srcClip.frameDuration = options.frameDuration;
+    for (const SkeletonBone& b : srcSkel.bones) srcClip.bones.push_back(b.name);
+    srcClip.Resize(last - first + 1);
+    float yaw0 = 0.f;
+    for (int f = first; f <= last; ++f)
+        if (const Pose pose = Solve(bound, FramePoints(bound, clipTake, f)); pose.ok[std::size_t(anchorSrc)]) {
+            yaw0 = Yaw(pose.q[std::size_t(anchorSrc)]);
+            break;
+        }
+    const Quat start = QAngleAxis(-yaw0, kUp);
     for (int f = first; f <= last; ++f) {
-        const Pose pose = Solve(bound, FramePoints(bound, clipTake, f));
-        if (pose.ok[std::size_t(anchorSrc)]) {
-            yaw    = Yaw(pose.q[std::size_t(anchorSrc)]);
-            travel = pose.p[std::size_t(anchorSrc)];
-            height = travel[2];
-        }
-        if (f == first) {
-            yaw0    = yaw;
-            origin0 = travel;
-        }
-        const Quat facing = QAngleAxis(-yaw0, kUp);
-        for (std::size_t s = 0; s < delta.size(); ++s) {
-            const int parent = bound.bones[s].parent;
-            if (pose.ok[s] && rest.ok[s])
-                delta[s] = QNormalize(QMul(QMul(facing, pose.q[s]), QInverse(restCanon[s])));
-            else
-                delta[s] = parent >= 0 ? delta[std::size_t(parent)] : Quat{0.f, 0.f, 0.f, 1.f};
-        }
-
-        const Quat rootRot = QAngleAxis(yaw - yaw0, kUp);
-        Vec3       rootPos = Scale(QRotate(facing, Sub(travel, origin0)), scale);
-        rootPos[2]         = 0.f;
-        const Vec3 anchorPos = Add(Add(rootPos, QRotate(rootRot, anchorFromRoot)), {0.f, 0.f, scale * (height - restHeight)});
-
-        for (std::size_t t = 0; t < nT; ++t) {
-            const int        parent = target.bones[t].parent;
-            const Transform& bl     = bindLocal[t];
-            const Quat       pq     = parent >= 0 ? world[std::size_t(parent)] : Quat{0.f, 0.f, 0.f, 1.f};
-            const Vec3       pp     = parent >= 0 ? worldPos[std::size_t(parent)] : Vec3{0.f, 0.f, 0.f};
-            if (int(t) == root) world[t] = rootRot;
-            else if (drive[t].src >= 0) world[t] = QNormalize(QMul(delta[std::size_t(drive[t].src)], aligned[t]));
-            else world[t] = QNormalize(QMul(pq, rot(bl)));
-
-            Transform& out = clip.At(f - first, int(t));
-            out.r          = parent >= 0 ? QNormalize(QMul(QInverse(pq), world[t])) : world[t];
-            out.s          = bl.s;
-            if (int(t) == root) out.t = parent >= 0 ? QRotate(QInverse(pq), Sub(rootPos, pp)) : rootPos;
-            else if (int(t) == anchor) out.t = QRotate(QInverse(pq), Sub(anchorPos, pp));
-            else out.t = bl.t;
-            worldPos[t] = Add(pp, QRotate(pq, out.t));
-        }
+        const auto local = locals(Solve(bound, FramePoints(bound, clipTake, f)), start, false);
+        for (std::size_t s = 0; s <= nS; ++s) srcClip.At(f - first, int(s)) = local[s];
     }
+
+    // The pairs as a BoneMap: the anchor is the hips, its aim axis the source's bone axis, and the heading the anchor's.
+    BoneMap bm;
+    bm.name       = map.name;
+    bm.target     = target.name;
+    bm.sourceHips = map.anchorSource;
+    bm.targetRoot = map.root;
+    bm.targetHips = map.anchor;
+    bm.sourceAxis = std::array<float, 3>{kAim[0], kAim[1], kAim[2]};
+    bm.bones[map.root] = floorName;
+    for (std::size_t t = 0; t < nT; ++t) {
+        const Drive& d = drive[t];
+        if (d.src < 0 || !rest.ok[std::size_t(d.src)]) continue;
+        bm.bones[target.bones[t].name] = layout.bones[std::size_t(d.src)].name;
+        if (d.aim >= 0) bm.aim[target.bones[t].name] = target.bones[std::size_t(d.aim)].name;
+        if (target.bones[t].name != map.root) ++rep.mappedBones;
+    }
+
+    RetargetOptions ro;
+    ro.scale = options.scale;
+    RetargetReport rr;
+    auto clip = RetargetClip(srcSkel, srcClip, target, bm, ro, &rr);
+    if (!clip) return std::unexpected(clip.error());
+    clip->skeleton = target.bones[0].name;
+    rep.scale      = rr.scale;
     if (report) *report = std::move(rep);
     return clip;
 }
