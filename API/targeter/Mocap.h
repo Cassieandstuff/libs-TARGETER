@@ -3,8 +3,8 @@
 // A MocapLayout turns a marker cloud into a posed SOURCE skeleton: virtual markers (weighted sums of markers, e.g.
 // joint centres) are synthesised, then each source bone is oriented by aiming it from its origin marker at its aim
 // marker and rolling it toward a roll marker or the plane of a hinge marker. A MocapMap names the target bone each
-// source bone drives; RetargetMocap applies each source bone's world rotation since the rest frame onto that target
-// bone's rest, keeps the target's own bone lengths, and puts the travel and heading on the target's root.
+// source bone drives; RetargetMocap solves the take into a source Skeleton (its rest frame) and Clip, and retargets those
+// through RetargetClip, so marker capture and skeletal clips share one transfer.
 // Approach after Scene Editor's FreeMoCap path (sct-pipeline Mocap / MocapRetargeter), reimplemented over this
 // library's data model. Marker and bone names are matched byte-exact.
 
@@ -65,11 +65,10 @@ struct MocapLayout {
     bool operator==(const MocapLayout&) const = default;
 };
 
-/// One source bone driving one target bone. `targetAim` is the target bone's aim child; with `alignRest`, the
-/// target's rest is turned so the bone points the way the source bone pointed in the rest frame.
+/// One source bone driving one target bone. `targetAim` is the target bone's aim child: the target's rest is turned so
+/// the bone points the way the source bone pointed in the rest frame.
 struct MocapPair {
     std::string source, target, targetAim;
-    bool        alignRest = false;
     bool operator==(const MocapPair&) const = default;
 };
 

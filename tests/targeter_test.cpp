@@ -1,6 +1,11 @@
 #include <targeter/Targeter.h>
+#include "MathOps.h"
 
+#include <algorithm>
 #include <cassert>
+#include <initializer_list>
+#include <string>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -26,7 +31,8 @@ static bool NearQuat(const std::array<float,4>& a, const std::array<float,4>& b,
 }
 
 static void Pass(const char* name) { std::printf("[PASS] %s\n", name); }
-static void Fail(const char* name) { std::printf("[FAIL] %s\n", name); std::exit(1); }
+static int  g_failures = 0;
+static void Fail(const char* name) { std::printf("[FAIL] %s\n", name); ++g_failures; }
 
 #define CHECK(cond, name) do { if (!(cond)) Fail(name); else Pass(name); } while(0)
 
@@ -389,7 +395,342 @@ static void TestFootPlants() {
     CHECK(!DetectFootPlants(c, s, {"Root", "Nope", "RFoot"}).hasFeet, "no foot, no plants");
 }
 
+// ── Retarget failure cases (docs/bugs.md R1–R9) ──────────────────────────────
+
+namespace d = targeter::detail;
+
+static constexpr float kDeg = std::numbers::pi_v<float> / 180.f;
+
+static d::Quat Rot(float degrees, d::Vec3 axis) { return d::QAngleAxis(degrees * kDeg, d::Normalize(axis)); }
+
+static void AddBone(Skeleton& s, const char* name, const char* parent, std::array<float, 3> t) {
+    SkeletonBone b;
+    b.name   = name;
+    b.parent = parent ? s.BoneIndex(parent) : -1;
+    b.rest.t = t;
+    s.bones.push_back(b);
+}
+
+/// @brief The map driving every target bone from the source bone of the same name.
+static BoneMap SameNames(const Skeleton& target, const Skeleton& source) {
+    BoneMap m = LegsMap();
+    m.bones.clear();
+    for (const auto& b : target.bones)
+        if (source.BoneIndex(b.name) >= 0) m.bones[b.name] = b.name;
+    return m;
+}
+
+static std::vector<Transform> ModelAt(const Skeleton& s, const Clip& c, int frame) {
+    std::vector<Transform> local(s.bones.size());
+    for (std::size_t b = 0; b < s.bones.size(); ++b) local[b] = c.At(frame, c.BoneIndex(s.bones[b].name));
+    return ComputeModelSpace(s, local);
+}
+
+static d::Quat Q(const std::array<float, 4>& q) { return {q[0], q[1], q[2], q[3]}; }
+static d::Vec3 V(const std::array<float, 3>& v) { return {v[0], v[1], v[2]}; }
+
+/// @brief The angle (degrees) of the rotation `q`.
+static float AngleOf(const std::array<float, 4>& q) {
+    return 2.f * std::acos(std::min(1.f, std::fabs(q[3]))) / kDeg;
+}
+
+/// @brief The yaw (degrees) a rotation gives the +Y axis.
+static float YawDegrees(const std::array<float, 4>& q) { return d::YawOf(d::QRotate(Q(q), {0.f, 1.f, 0.f})) / kDeg; }
+
+// R1: Skyrim's twist bones held their rest while the hand pronated and the upper arm rolled: the skin candy-wrapped.
+static void TestTwistBonesShareTheTwist() {
+    Skeleton s;
+    AddBone(s, "Root", nullptr, {0, 0, 0});
+    AddBone(s, "Hips", "Root", {0, 0, 100});
+    AddBone(s, "Upper", "Hips", {-10, 0, 40});
+    AddBone(s, "Fore", "Upper", {-20, 0, 0});
+    AddBone(s, "Hand", "Fore", {-20, 0, 0});
+    Skeleton t = s;
+    AddBone(t, "UTwist", "Upper", {-5, 0, 0});
+    AddBone(t, "FTwist", "Fore", {-10, 0, 0});
+    BoneMap m = SameNames(t, s);
+    m.twist["FTwist"] = {"Hand", 0.5f};
+    m.twist["UTwist"] = {"Upper", -0.5f};
+    Clip c = RestClip(s, 1);
+    c.At(0, c.BoneIndex("Hand")).r  = Rot(80.f, {1, 0, 0});
+    c.At(0, c.BoneIndex("Upper")).r = Rot(60.f, {1, 0, 0});
+    RetargetReport r;
+    const auto out = RetargetClip(s, c, t, m, RetargetOptions{}, &r);
+    CHECK(out.has_value(), "R1 retarget with twist bones");
+    if (!out) return;
+    const auto& ft = out->At(0, out->BoneIndex("FTwist")).r;
+    const auto& ut = out->At(0, out->BoneIndex("UTwist")).r;
+    CHECK(NearQuat(ft, Rot(40.f, {1, 0, 0}), 1e-3f), "R1 a forearm twist bone takes half the hand's pronation");
+    CHECK(NearQuat(ut, Rot(-30.f, {1, 0, 0}), 1e-3f), "R1 an upper-arm twist bone turns back half the arm's roll");
+
+    BoneMap bad = m;
+    bad.twist["FTwist"] = {"Hips", 0.5f};
+    RetargetReport rb;
+    (void)RetargetClip(s, c, t, bad, RetargetOptions{}, &rb);
+    CHECK(rb.ignoredTwists.size() == 1 && rb.ignoredTwists[0] == "FTwist", "R1 a twist driven from elsewhere is reported");
+}
+
+/// @brief Two legs whose thigh and calf split their length `thigh`:`calf`, hips at 100.
+static Skeleton KneeRig(float thigh, float calf) {
+    Skeleton s;
+    AddBone(s, "Root", nullptr, {0, 0, 0});
+    AddBone(s, "Hips", "Root", {0, 0, 100});
+    AddBone(s, "LThigh", "Hips", {-10, 0, 0});
+    AddBone(s, "LCalf", "LThigh", {0, 0, -thigh});
+    AddBone(s, "LFoot", "LCalf", {0, 0, -calf});
+    AddBone(s, "RThigh", "Hips", {10, 0, 0});
+    AddBone(s, "RCalf", "RThigh", {0, 0, -thigh});
+    AddBone(s, "RFoot", "RCalf", {0, 0, -calf});
+    return s;
+}
+
+// R2: one hip-height scale, but legs split differently: the planted feet slid while the hips travelled.
+static void TestFootLockPinsPlants() {
+    const Skeleton s = KneeRig(50.f, 50.f);
+    const Skeleton t = KneeRig(30.f, 70.f);
+    // Both feet stay on the floor under the hips' start while the hips slide 15 forward at a constant height of 90.
+    Clip c = RestClip(s, 20);
+    c.frameDuration = 1.f / 30.f;
+    for (int f = 0; f < 20; ++f) {
+        const float y = 15.f * float(f) / 19.f;
+        c.At(f, c.BoneIndex("Hips")).t = {0.f, y, 90.f};
+        // Leg plane YZ: hip at the origin, foot at (-y, -90); the knee forward.
+        const float dy = -y, dz = -90.f, dist = std::sqrt(dy * dy + dz * dz);
+        const float toward = std::atan2(dy, -dz);
+        const float hip    = std::acos(std::clamp(dist / 100.f, -1.f, 1.f));   // equal halves of 50
+        for (const char* side : {"L", "R"}) {
+            c.At(f, c.BoneIndex(std::string(side) + "Thigh")).r = d::QAngleAxis(toward + hip, {1.f, 0.f, 0.f});
+            c.At(f, c.BoneIndex(std::string(side) + "Calf")).r  = d::QAngleAxis(-2.f * hip, {1.f, 0.f, 0.f});
+        }
+    }
+    BoneMap m = SameNames(t, s);
+    m.targetLeftFoot = "LFoot", m.targetRightFoot = "RFoot";
+    auto drift = [&](const Clip& out) {
+        float most = 0.f;
+        const auto start = ModelAt(t, out, 0)[std::size_t(t.BoneIndex("LFoot"))].t;
+        for (int f = 0; f < out.numFrames; ++f) {
+            const auto p = ModelAt(t, out, f)[std::size_t(t.BoneIndex("LFoot"))].t;
+            most = std::max(most, d::Len(d::Sub(V(p), V(start))));
+        }
+        return most;
+    };
+    const auto loose = RetargetClip(s, c, t, m, RetargetOptions{});
+    CHECK(loose.has_value() && drift(*loose) > 2.f, "R2 unlocked, the target's planted foot slides");
+    RetargetOptions lock;
+    lock.lockFeet = true;
+    RetargetReport r;
+    const auto locked = RetargetClip(s, c, t, m, lock, &r);
+    CHECK(locked.has_value(), "R2 retarget with foot lock");
+    if (!locked) return;
+    CHECK(drift(*locked) < 0.5f, "R2 locked, the planted foot stays where it landed");
+    CHECK(r.lockedFrames == 20, "R2 every frame is locked");
+    const auto hips0 = ModelAt(t, *locked, 19)[1].t;
+    const auto hips1 = ModelAt(t, *loose, 19)[1].t;
+    CHECK(NearVec3(hips0, hips1, 1e-3f), "R2 the lock leaves the hips alone");
+}
+
+// R3: the target root took the source root's pitch and roll, and without a source root it took the hips' heading, so
+// the pelvis' sway each stride turned the root (and the motion data) back and forth.
+static void TestRootIsYawOnlyAndSteady() {
+    const Skeleton s = LegsRig();
+    Clip c = RestClip(s, 2);
+    c.At(1, 0).r = d::QMul(Rot(40.f, {0, 0, 1}), Rot(30.f, {1, 0, 0}));
+    const auto out = RetargetClip(s, c, s, LegsMap(), RetargetOptions{});
+    CHECK(out.has_value(), "R3 retarget a pitched source root");
+    if (!out) return;
+    const auto& root = out->At(1, 0).r;
+    CHECK(NearVec3(d::QRotate(Q(root), {0.f, 0.f, 1.f}), {0.f, 0.f, 1.f}, 1e-3f), "R3 the root stays upright");
+    CHECK(std::fabs(YawDegrees(root) - 40.f) < 0.1f, "R3 the root keeps the source root's heading");
+
+    // No source root: the hips sway 10 deg each way once a second, for four seconds.
+    BoneMap m = LegsMap();
+    m.sourceRoot = "";
+    Clip sway    = RestClip(s, 121);
+    sway.frameDuration = 1.f / 30.f;
+    for (int f = 0; f < 121; ++f)
+        sway.At(f, 1).r = Rot(10.f * std::sin(2.f * std::numbers::pi_v<float> * float(f) / 30.f), {0, 0, 1});
+    const auto steady = RetargetClip(s, sway, s, m, RetargetOptions{});
+    CHECK(steady.has_value(), "R3 retarget a swaying source without a root");
+    if (!steady) return;
+    float rootMost = 0.f, hipsErr = 0.f;
+    for (int f = 30; f < 91; ++f) {
+        rootMost = std::max(rootMost, std::fabs(YawDegrees(steady->At(f, 0).r)));
+        const auto hips = ModelAt(s, *steady, f)[1].r;
+        hipsErr = std::max(hipsErr, std::fabs(YawDegrees(hips) - 10.f * std::sin(2.f * std::numbers::pi_v<float> * float(f) / 30.f)));
+    }
+    CHECK(rootMost < 2.5f, "R3 the root's heading ignores the hips' sway");
+    CHECK(hipsErr < 0.1f, "R3 the hips still sway as the source's do");
+}
+
+// R4: the ground was the lowest joint of all, so a helper bone below the feet (Skyrim's x_NPC, at -2) sank the root
+// and grew the scale.
+static void TestGroundIgnoresHelpers() {
+    const Skeleton s = LegsRig();
+    Skeleton       t = LegsRig();
+    AddBone(t, "Helper", "Root", {0, 0, -2});
+    RetargetReport r;
+    const auto out = RetargetClip(s, RestClip(s, 1), t, LegsMap(), RetargetOptions{}, &r);
+    CHECK(out.has_value(), "R4 retarget onto a rig with a helper below the floor");
+    if (!out) return;
+    CHECK(std::fabs(r.scale - 1.f) < 1e-4f, "R4 the helper doesn't change the scale");
+    const auto model = ModelAt(t, *out, 0);
+    CHECK(std::fabs(model[0].t[2]) < 1e-3f, "R4 the root stays on the floor");
+    CHECK(std::fabs(model[1].t[2] - 100.f) < 1e-3f, "R4 the hips stay at their height");
+}
+
+/// @brief Hips, a spine of `spine` bones `step` apart, and a neck, on LegsRig.
+static Skeleton SpineRig(const std::vector<std::string>& spine, float step) {
+    Skeleton s = LegsRig();
+    std::string parent = "Hips";
+    for (const auto& b : spine) {
+        AddBone(s, b.c_str(), parent.c_str(), {0, 0, step});
+        parent = b;
+    }
+    AddBone(s, "Neck", parent.c_str(), {0, 0, step});
+    return s;
+}
+
+// R5: a source with fewer spine bones left the target's extra one at rest, so the whole bend kinked at one joint.
+static void TestBetweenBonesShareTheBend() {
+    const Skeleton s = SpineRig({"Spine0", "Spine2"}, 15.f);
+    const Skeleton t = SpineRig({"Spine0", "Spine1", "Spine2"}, 10.f);
+    BoneMap m = SameNames(t, s);
+    m.between.insert("Spine1");
+    Clip c = RestClip(s, 1);
+    c.At(0, c.BoneIndex("Spine2")).r = Rot(40.f, {1, 0, 0});
+    const auto out = RetargetClip(s, c, t, m, RetargetOptions{});
+    CHECK(out.has_value(), "R5 retarget a coarse spine");
+    if (!out) return;
+    CHECK(std::fabs(AngleOf(out->At(0, out->BoneIndex("Spine1")).r) - 20.f) < 0.5f, "R5 the unmapped spine bone takes its share");
+    CHECK(std::fabs(AngleOf(out->At(0, out->BoneIndex("Spine2")).r) - 20.f) < 0.5f, "R5 the next bone takes the rest");
+    CHECK(std::fabs(AngleOf(ModelAt(t, *out, 0)[std::size_t(t.BoneIndex("Spine2"))].r) - 40.f) < 0.5f, "R5 the chest still turns as the source's");
+}
+
+// R6: the default aim was the first mapped child by index: the chest aimed at a clavicle (SCT ED-10). And an aim on the
+// hips was dropped without a word.
+static void TestDefaultAimFollowsTheChain() {
+    auto rig = [](float tilt) {
+        Skeleton s = LegsRig();
+        AddBone(s, "Spine", "Hips", {0, 0, 10});
+        AddBone(s, "Chest", "Spine", {0, 0, 20});
+        AddBone(s, "LClav", "Chest", {-10, 0, 15});
+        AddBone(s, "Neck", "Chest", {0, 20.f * std::sin(tilt * kDeg), 20.f * std::cos(tilt * kDeg)});
+        AddBone(s, "Head", "Neck", {0, 0, 10});
+        return s;
+    };
+    const Skeleton s = rig(20.f), t = rig(0.f);
+    BoneMap m = SameNames(t, s);
+    m.aim["Hips"] = "Spine";
+    RetargetReport r;
+    const auto out = RetargetClip(s, RestClip(s, 1), t, m, RetargetOptions{}, &r);
+    CHECK(out.has_value(), "R6 retarget a chest with a clavicle listed first");
+    if (!out) return;
+    const auto model = ModelAt(t, *out, 0);
+    const auto neck  = d::Sub(V(model[std::size_t(t.BoneIndex("Neck"))].t), V(model[std::size_t(t.BoneIndex("Chest"))].t));
+    CHECK(std::fabs(neck[1] - 20.f * std::sin(20.f * kDeg)) < 0.05f, "R6 the chest aims at the neck, the way the chain runs");
+    CHECK(r.ignoredAims.size() == 1 && r.ignoredAims[0] == "Hips", "R6 an aim on the hips is reported");
+}
+
+// R7: the rest alignment only swung a bone at its aim child, so a hand whose palm the two rigs roll differently kept
+// that roll ("blocky", DCC 3.3c).
+static void TestRestRollFollowsTheOtherChildren() {
+    auto rig = [](d::Vec3 index) {
+        Skeleton s = LegsRig();
+        AddBone(s, "Hand", "Hips", {-20, 0, 40});
+        AddBone(s, "Middle", "Hand", {-10, 0, 0});
+        AddBone(s, "Index", "Hand", index);
+        return s;
+    };
+    const Skeleton s = rig({-9, 3, 0}), t = rig({-9, 0, 3});
+    BoneMap m = SameNames(t, s);
+    m.aim["Hand"] = "Middle";
+    const auto out = RetargetClip(s, RestClip(s, 1), t, m, RetargetOptions{});
+    CHECK(out.has_value(), "R7 retarget a hand rolled 90 deg");
+    if (!out) return;
+    const auto model = ModelAt(t, *out, 0);
+    const auto index = d::Sub(V(model[std::size_t(t.BoneIndex("Index"))].t), V(model[std::size_t(t.BoneIndex("Hand"))].t));
+    CHECK(NearVec3(index, {-9.f, 3.f, 0.f}, 1e-2f), "R7 the palm turns the way the source's faces");
+}
+
+// R8: a heading taken through atan2 jumped from +180 to -180 deg, and its quaternion changed sign between two frames.
+static void TestTracksStayInOneHemisphere() {
+    const Skeleton s = LegsRig();
+    BoneMap m = LegsMap();
+    m.sourceRoot = "";
+    Clip c = RestClip(s, 61);
+    for (int f = 0; f < 61; ++f) c.At(f, 1).r = Rot(6.f * float(f), {0, 0, 1});
+    const auto out = RetargetClip(s, c, s, m, RetargetOptions{});
+    CHECK(out.has_value(), "R8 retarget a full turn");
+    if (!out) return;
+    bool same = true;
+    for (int f = 1; f < out->numFrames; ++f)
+        for (std::size_t b = 0; b < out->bones.size(); ++b)
+            same = same && d::QDot(Q(out->At(f - 1, int(b)).r), Q(out->At(f, int(b)).r)) >= 0.f;
+    CHECK(same, "R8 no track changes sign between frames");
+    CHECK(std::fabs(YawDegrees(out->At(30, 0).r) - 180.f) < 3.f || std::fabs(YawDegrees(out->At(30, 0).r) + 180.f) < 3.f,
+          "R8 the root still turns with the hips");
+}
+
+// R9: RetargetMocap had its own transfer; PFERD's pairs never set alignRest, so a target whose rest leg points elsewhere
+// than the rest frame's kept its own rest.
+static void TestMocapAlignsRest() {
+    Skeleton tgt;
+    tgt.bones = {{"Root", -1, {}}, {"Body", 0, {}}, {"Leg", 1, {}}, {"Foot", 2, {}}};
+    tgt.bones[1].rest.t = {0.f, 0.f, 100.f};
+    tgt.bones[3].rest.t = {0.f, 50.f * std::sin(30.f * kDeg), -50.f * std::cos(30.f * kDeg)};
+
+    MocapLayout layout;
+    layout.bones = {{"body", "", "back", "front", "right"}, {"leg", "body", "hip", "knee", "kneeSide"}};
+    MocapMap map;
+    map.root = "Root", map.anchor = "Body", map.anchorSource = "body";
+    map.pairs = {{"body", "Body"}, {"leg", "Leg", "Foot"}};
+    MarkerTake take;
+    take.name    = "hang";
+    take.markers = {"back", "front", "right", "hip", "knee", "kneeSide"};
+    take.frameDuration = 1.f / 30.f, take.numFrames = 2;
+    for (int f = 0; f < 2; ++f)
+        for (std::array<float, 3> p : std::initializer_list<std::array<float, 3>>{
+                 {0, -10, 100}, {0, 10, 100}, {10, 0, 100}, {0, 0, 100}, {0, 0, 60}, {10, 0, 60}})
+            take.points.push_back(p);
+    MocapRetargetOptions opt;
+    opt.restFrame = 0, opt.scale = 1.f;
+    const auto clip = RetargetMocap(layout, map, take, tgt, opt);
+    CHECK(clip.has_value(), "R9 retarget a hanging leg");
+    if (!clip) return;
+    std::vector<Transform> local(clip->poses.begin(), clip->poses.begin() + 4);
+    const auto model = ComputeModelSpace(tgt, local);
+    CHECK(NearVec3(model[3].t, {0.f, 0.f, 50.f}, 1e-2f), "R9 the target leg hangs as the markers' does");
+}
+
+static void TestTurnPoseOffset() {
+    const Skeleton s = LegsRig();
+    BoneMap        m = LegsMap();
+    Clip           c = RestClip(s, 1);
+    c.At(0, 2).r = Rot(25.f, {1, 0, 0});
+    const auto base = RetargetClip(s, c, s, m);
+    CHECK(base.has_value(), "TurnPoseOffset base retarget");
+    if (!base) return;
+    const auto w    = ModelAt(s, *base, 0)[2].r;
+    const auto turn = Rot(30.f, {0, 1, 0});
+    m.pose["LThigh"] = TurnPoseOffset({0, 0, 0, 1}, w, turn);
+    const auto posed = RetargetClip(s, c, s, m);
+    CHECK(posed.has_value(), "TurnPoseOffset posed retarget");
+    if (!posed) return;
+    const auto d2 = d::QMul(turn, Q(w));
+    CHECK(NearQuat(ModelAt(s, *posed, 0)[2].r, {d2[0], d2[1], d2[2], d2[3]}, 1e-3f), "TurnPoseOffset turns the bone in model space");
+}
+
 int main() {
+    TestTwistBonesShareTheTwist();
+    TestFootLockPinsPlants();
+    TestRootIsYawOnlyAndSteady();
+    TestGroundIgnoresHelpers();
+    TestBetweenBonesShareTheBend();
+    TestDefaultAimFollowsTheChain();
+    TestRestRollFollowsTheOtherChildren();
+    TestTracksStayInOneHemisphere();
+    TestMocapAlignsRest();
+    TestTurnPoseOffset();
     TestRetargetPoseOffset();
     TestPlaceSourcePoint();
     TestHipsDontAim();
@@ -405,6 +746,10 @@ int main() {
     TestResampleTake();
     TestMarkerPrefix();
     TestRetargetMocapSwing();
+    if (g_failures) {
+        std::printf("%d check(s) failed.\n", g_failures);
+        return 1;
+    }
     std::printf("All tests passed.\n");
     return 0;
 }

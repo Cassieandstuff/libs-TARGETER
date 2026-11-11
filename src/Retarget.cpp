@@ -38,12 +38,14 @@ World Fk(const Skeleton& skel, LocalFn&& local) {
 } // namespace
 
 std::expected<Clip, std::string> RetargetClip(
-    const Skeleton& source,
-    const Clip&     clip,
-    const Skeleton& target,
-    const BoneMap&  map,
-    RetargetReport* report)
+    const Skeleton&        source,
+    const Clip&            clip,
+    const Skeleton&        target,
+    const BoneMap&         map,
+    const RetargetOptions& options,
+    RetargetReport*        report)
 {
+    (void)options;
     const std::size_t nT = target.bones.size();
     const std::size_t nS = source.bones.size();
 
@@ -276,6 +278,24 @@ std::expected<Clip, std::string> RetargetClip(
 std::array<float, 3> PlaceSourcePoint(const RetargetReport& r, const std::array<float, 3>& p) {
     const Vec3 faced = QRotate({r.facing[0], r.facing[1], r.facing[2], r.facing[3]}, {p[0], p[1], p[2] - r.sourceGround});
     return {r.scale * faced[0] - r.startOffset[0], r.scale * faced[1] - r.startOffset[1], r.scale * faced[2] + r.targetGround};
+}
+
+} // namespace targeter
+
+namespace targeter {
+
+std::expected<Clip, std::string> RetargetClip(const Skeleton& source, const Clip& clip, const Skeleton& target,
+                                              const BoneMap& map, RetargetReport* report) {
+    return RetargetClip(source, clip, target, map, RetargetOptions{}, report);
+}
+
+std::array<float, 4> TurnPoseOffset(const std::array<float, 4>& offset, const std::array<float, 4>& boneWorld,
+                                    const std::array<float, 4>& turn) {
+    using namespace detail;
+    // The offset right-multiplies the bone's aligned rest, so the bone shows at W * offset: turning it to Q * W takes
+    // offset' = offset * (W^-1 Q W).
+    const Quat w = QNormalize(boneWorld);
+    return QNormalize(QMul(offset, QMul(QInverse(w), QMul(QNormalize(turn), w))));
 }
 
 } // namespace targeter

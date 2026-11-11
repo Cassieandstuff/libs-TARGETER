@@ -314,7 +314,7 @@ std::expected<Clip, std::string> RetargetMocap(const MocapLayout& layout, const 
         const int  t = target.BoneIndex(p.target);
         if (s == srcByName.end()) { rep.missing.push_back(p.source); continue; }
         if (t < 0) { rep.missing.push_back(p.target); continue; }
-        drive[std::size_t(t)] = {s->second, p.targetAim.empty() ? -1 : target.BoneIndex(p.targetAim), p.alignRest};
+        drive[std::size_t(t)] = {s->second, p.targetAim.empty() ? -1 : target.BoneIndex(p.targetAim), false};
         if (!p.targetAim.empty() && drive[std::size_t(t)].aim < 0) rep.missing.push_back(p.targetAim);
     }
 

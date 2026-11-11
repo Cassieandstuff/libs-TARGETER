@@ -58,6 +58,8 @@ if(TARGETER_BUILD_TESTS)
     enable_testing()
     add_executable(targeter-test tests/targeter_test.cpp)
     target_link_libraries(targeter-test PRIVATE targeter::targeter)
+    # The tests build poses with the library's own quaternion helpers.
+    target_include_directories(targeter-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     if(MSVC)
         target_compile_options(targeter-test PRIVATE /utf-8)
     endif()
