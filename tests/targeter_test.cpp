@@ -448,9 +448,11 @@ static void TestTwistBonesShareTheTwist() {
     Skeleton t = s;
     AddBone(t, "UTwist", "Upper", {-5, 0, 0});
     AddBone(t, "FTwist", "Fore", {-10, 0, 0});
+    AddBone(t, "UTwist2", "UTwist", {-5, 0, 0});   // Skyrim hangs UpperarmTwist2 under UpperarmTwist1
     BoneMap m = SameNames(t, s);
     m.twist["FTwist"] = {"Hand", 0.5f};
     m.twist["UTwist"] = {"Upper", -0.5f};
+    m.twist["UTwist2"] = {"Upper", std::nullopt};
     Clip c = RestClip(s, 1);
     c.At(0, c.BoneIndex("Hand")).r  = Rot(80.f, {1, 0, 0});
     c.At(0, c.BoneIndex("Upper")).r = Rot(60.f, {1, 0, 0});
@@ -462,6 +464,9 @@ static void TestTwistBonesShareTheTwist() {
     const auto& ut = out->At(0, out->BoneIndex("UTwist")).r;
     CHECK(NearQuat(ft, Rot(40.f, {1, 0, 0}), 1e-3f), "R1 a forearm twist bone takes half the hand's pronation");
     CHECK(NearQuat(ut, Rot(-30.f, {1, 0, 0}), 1e-3f), "R1 an upper-arm twist bone turns back half the arm's roll");
+    // UTwist2 sits halfway down the arm: half the roll undone in all, of which its parent already undid 30 deg.
+    CHECK(NearQuat(out->At(0, out->BoneIndex("UTwist2")).r, Rot(0.f, {1, 0, 0}), 1e-3f), "R1 a twist bone under a twist bone adds only its own share");
+    CHECK(r.ignoredTwists.empty(), "R1 a chained twist bone is not ignored");
 
     // With no fraction, each takes its share by where it sits: FTwist halfway down the forearm, UTwist a quarter of the
     // way down the upper arm (so three quarters of the roll undone).

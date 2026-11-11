@@ -4,7 +4,21 @@ Each entry: symptom, what was ruled out, root cause at `file:line`, status (`OPE
 test that pins it (`tests/targeter_test.cpp`). Measurements on real clips come from BK's `[.measure]` retarget test
 (UEFN Mannequin clips onto Skyrim's human skeleton, `retarget-sources/ue5-manny.yaml`).
 
-## R1 — Twist bones hold their rest: the wrist and upper arm candy-wrap — FIXED (23269f4, b75bc7a)
+Real-clip measurements, 2026-11-10: 40 UEFN Mannequin clips (8 each of Idle, Walk, Run, Sprint, Crouch) onto the
+vanilla skeleton of `D:/Projects/Common/Skyrim Source/Data`, before (`af24ae5`) and after this branch:
+
+| Measure | Before | After, lock off | After, lock on |
+|---|---|---|---|
+| Planted-foot slide, mean of clips (u/s) | 24.85 | 24.85 | 1.43 |
+| Planted-foot slide, worst frame (u/s) | 302.7 | 302.7 | 50.8 |
+| Largest twist between forearm neighbours (deg, worst clip) | 72.5 | 24.5 | 24.5 |
+| Key pairs that change sign (all clips) | 1 | 0 | 0 |
+| Farthest a locked foot stays off its plant (u) | – | – | 8.6 (sprints: the leg can't reach) |
+
+Root tilt, root heading wobble and the root's start height measured 0 before and after: UE clips carry an authored root
+on the floor, so R3 and R4 show only on sources without one (mocap, cmu-daz) and are pinned by the synthetic tests.
+
+## R1 — Twist bones hold their rest: the wrist and upper arm candy-wrap — FIXED (23269f4, b75bc7a, and the chained twist commit)
 
 - **Symptom:** a hand that pronates, or an upper arm that rolls, twists the skin at one joint. Skyrim's
   `UpperarmTwist1/2` and `ForearmTwist1/2` stay at rest under their parent.
@@ -12,6 +26,9 @@ test that pins it (`tests/targeter_test.cpp`). Measurements on real clips come f
 - **Root cause:** `src/Retarget.cpp` gave an unmapped bone its rest pose under its parent, with no way to share a
   neighbour's twist.
 - **Test:** `TestTwistBonesShareTheTwist`.
+- **Measured:** the largest twist between forearm neighbours (forearm, its twist bones, hand) fell from 72.5 to 24.5 deg
+  at worst. Skyrim hangs `UpperarmTwist2` under `UpperarmTwist1`, so a twist bone may hang under another and adds
+  only its own share.
 
 ## R2 — Planted feet slide — FIXED (23269f4)
 
@@ -22,6 +39,7 @@ test that pins it (`tests/targeter_test.cpp`). Measurements on real clips come f
   source's (Skyrim's legs are 0.742 of hip height against 0.710), so the same joint angles put the foot elsewhere.
   `DetectFootPlants` found the plants, but nothing pinned them.
 - **Test:** `TestFootLockPinsPlants`.
+- **Measured:** planted-foot slide fell from 24.85 to 1.43 u/s on average with the lock on.
 - **Note:** `RetargetOptions::lockFeet` is off in the library, but BK's Retarget window turns it on by default. Re-baking a
   clip there changes the thighs, calves and feet of its planted frames, compared with a bake made before.
 
@@ -68,6 +86,7 @@ test that pins it (`tests/targeter_test.cpp`). Measurements on real clips come f
   key to the next. Interpolating between the two keys goes the long way round.
 - **Root cause:** `src/Retarget.cpp`, the no-root heading. No track was kept in one hemisphere.
 - **Test:** `TestTracksStayInOneHemisphere`.
+- **Measured:** one sign change before (`Run/M_Neutral_Run_Box_B_LL_Rfoot`), none after.
 
 ## R9 — Marker mocap has its own transfer, and PFERD never aligns a rest — FIXED (23269f4)
 

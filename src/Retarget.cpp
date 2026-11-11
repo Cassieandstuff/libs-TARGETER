@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <tuple>
 
 namespace targeter {
 
@@ -98,9 +99,11 @@ struct Between {
 /// @brief An unmapped twist bone, and how it reads its driver's twist.
 struct Twist {
     int   bone = -1, driver = -1;
-    bool  own  = false;   ///< the driver is the twist bone's parent (else its sibling)
-    Vec3  axis{1.f, 0.f, 0.f};
-    float fraction = 0.f;
+    bool  own = false;               ///< the driver is the limb's own bone (else the bone beside it, a hand)
+    Vec3  axis{1.f, 0.f, 0.f};       ///< the limb, in the frame the driver's twist is read in
+    Vec3  local{1.f, 0.f, 0.f};      ///< the same line in the twist bone's parent's frame
+    float fraction  = 0.f;           ///< of the driver's twist, in all
+    float inherited = 0.f;           ///< what a parent twist bone already turned
 };
 
 } // namespace
@@ -310,34 +313,54 @@ std::expected<Clip, std::string> RetargetClip(
         between[std::size_t(u)] = {above, below[0], lengthTo(u) / whole};
     }
 
+    // Twist bones, parents first: a twist bone may hang under another (Skyrim's UpperarmTwist2 under UpperarmTwist1), and
+    // then turns only by what its share adds to its parent's.
+    std::vector<std::tuple<int, std::string, const TwistSource*>> twistOrder;
+    for (const auto& [name, from] : map.twist) twistOrder.emplace_back(target.BoneIndex(name), name, &from);
+    std::ranges::sort(twistOrder, {}, [](const auto& e) { return std::get<0>(e); });
+    std::vector<char> isTwist(nT, 0);
+    for (const auto& [bone, name, from] : twistOrder)
+        if (bone >= 0) isTwist[std::size_t(bone)] = 1;
+    std::vector<float> share(nT, 0.f);
     std::vector<Twist> twists;
-    for (const auto& [name, from] : map.twist) {
-        const int bone   = target.BoneIndex(name);
-        const int driver = target.BoneIndex(from.driver);
+    for (const auto& [bone, name, from] : twistOrder) {
+        const int driver = target.BoneIndex(from->driver);
         const int parent = bone >= 0 ? target.bones[std::size_t(bone)].parent : -1;
-        Twist     t{bone, driver, driver >= 0 && driver == parent, {1.f, 0.f, 0.f}, 0.f};
-        bool      ok = bone >= 0 && driver >= 0 && parent >= 0 && srcOf[std::size_t(bone)] < 0;
-        Vec3      limb{0.f, 0.f, 0.f};   // the limb the twist runs along, in the parent's frame
+        bool      ok     = bone >= 0 && driver >= 0 && parent >= 0 && srcOf[std::size_t(bone)] < 0;
+        // The limb's own bone: the parent, past any twist bones the twist bone hangs under.
+        int base = parent;
+        while (ok && base >= 0 && isTwist[std::size_t(base)] && base != driver) base = target.bones[std::size_t(base)].parent;
+        ok = ok && base >= 0;
+        Twist t;
+        t.bone      = bone;
+        t.driver    = driver;
+        t.own       = ok && driver == base;
+        t.inherited = ok && parent != base ? share[std::size_t(parent)] : 0.f;
+        Vec3 limb{0.f, 0.f, 0.f};   // the limb the twist runs along, in the base's frame
         if (ok && t.own) {
-            // The parent's own long axis: toward its aim child, else its first child that isn't the twist bone.
-            int along = aimOf[std::size_t(parent)];
-            for (std::size_t c = std::size_t(parent) + 1; along < 0 && c < nT; ++c)
-                if (target.bones[c].parent == parent && int(c) != bone) along = int(c);
-            if (along >= 0) limb = RestOffset(target, tgtRest, parent, along);
-        } else if (ok && target.bones[std::size_t(driver)].parent == parent) {
+            // The base's own long axis: toward its aim child, else its first child that isn't a twist bone.
+            int along = aimOf[std::size_t(base)];
+            for (std::size_t c = std::size_t(base) + 1; along < 0 && c < nT; ++c)
+                if (target.bones[c].parent == base && !isTwist[c]) along = int(c);
+            if (along >= 0) limb = RestOffset(target, tgtRest, base, along);
+        } else if (ok && target.bones[std::size_t(driver)].parent == base) {
             // A sibling driver (a hand under the forearm) twists about the line from their parent to it.
             limb = V(target.bones[std::size_t(driver)].rest.t);
         }
         ok = ok && LenSq(limb) > 1e-8f;
-        if (ok) {
-            t.axis = Normalize(limb);
-            // By default the share follows where the bone sits along the limb: all of a hand's pronation at the wrist, none
-            // at the elbow; all of an upper arm's roll undone at the shoulder, none at the elbow.
-            const float at = std::clamp(Dot(V(target.bones[std::size_t(bone)].rest.t), t.axis) / Len(limb), 0.f, 1.f);
-            t.fraction     = from.fraction ? *from.fraction : t.own ? -(1.f - at) : at;
+        if (!ok) {
+            rep.ignoredTwists.push_back(name);
+            continue;
         }
-        if (ok) twists.push_back(t);
-        else rep.ignoredTwists.push_back(name);
+        t.axis  = Normalize(limb);
+        t.local = Normalize(QRotate(QMul(QInverse(tgtRest.q[std::size_t(parent)]), tgtRest.q[std::size_t(base)]), t.axis));
+        // By default the share follows where the bone sits along the limb: all of a hand's pronation at the wrist, none at
+        // the elbow; all of an upper arm's roll undone at the shoulder, none at the elbow.
+        const Vec3  worldAxis = QRotate(tgtRest.q[std::size_t(base)], t.axis);
+        const float at = std::clamp(Dot(Sub(tgtRest.p[std::size_t(bone)], tgtRest.p[std::size_t(base)]), worldAxis) / Len(limb), 0.f, 1.f);
+        t.fraction     = from->fraction ? *from->fraction : t.own ? -(1.f - at) : at;
+        share[std::size_t(bone)] = t.fraction;
+        twists.push_back(t);
     }
 
     // ── Output clip ──────────────────────────────────────────────────────────
@@ -439,7 +462,8 @@ std::expected<Clip, std::string> RetargetClip(
             const Quat driver = Q(out.At(f, t.driver).r);
             const Quat aligned = alignedLocal[std::size_t(t.driver)];
             const Quat since  = QNormalize(t.own ? QMul(QInverse(aligned), driver) : QMul(driver, QInverse(aligned)));
-            const Quat local  = QNormalize(QMul(QAngleAxis(t.fraction * TwistAngle(since, t.axis), t.axis), alignedLocal[std::size_t(t.bone)]));
+            const Quat local  = QNormalize(QMul(QAngleAxis((t.fraction - t.inherited) * TwistAngle(since, t.axis), t.local),
+                                                alignedLocal[std::size_t(t.bone)]));
             out.At(f, t.bone).r = {local[0], local[1], local[2], local[3]};
         }
     }
